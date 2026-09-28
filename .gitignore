@@ -1,0 +1,5 @@
+.venv
+.env
+.directory
+__pycache__
+/data/proton-calendar.csv

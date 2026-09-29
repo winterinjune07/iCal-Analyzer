@@ -7,18 +7,41 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import StringConvertor as StrConv
 import recurring_ical_events
 import requests
 from icalendar import Calendar
 
+def parsePayPeriod():
+    payPeriodType = os.environ.get("PAY_PERIOD_TYPE", "")
+    if payPeriodType != 'daily' and payPeriodType != 'weekly' and payPeriodType != 'biweekly' and payPeriodType != 'monthly':
+        print('Invalid Pay Period!')
+        sys.exit(7)
+        return None
+    if payPeriodType == 'daily':
+        daysToPay = 1
+    elif payPeriodType == 'weekly':
+        daysToPay = 7
+    elif payPeriodType == 'biweekly':
+        daysToPay = 14
+    else:
+        daysToPay = 30
+    return daysToPay
 
+daysToPay = parsePayPeriod()
+
+TZ = os.environ.get("TIMEZONE", "").strip()
+LOCAL_TIMEZONE = ZoneInfo(TZ)
+
+# File structure setup
 PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "data"
-OUTPUT_FILE = OUTPUT_DIR / "proton-calendar.csv"
+OUTPUT_FILE = OUTPUT_DIR / "calendar.csv"
 
-LOCAL_TIMEZONE = ZoneInfo("America/New_York")
+today2 = date.today()
+payPeriodHistory = today2 - (StrConv.Date(os.environ.get("PAST_PAY_PERIOD", "").strip()))
 
-DAYS_BEFORE = 30
+DAYS_BEFORE = (payPeriodHistory.days + daysToPay)
 DAYS_AHEAD = 365
 REQUEST_TIMEOUT_SECONDS = 30
 
@@ -98,14 +121,14 @@ def download_calendar(ics_url: str) -> Calendar:
         response = requests.get(
             ics_url,
             timeout=REQUEST_TIMEOUT_SECONDS,
-            headers={"User-Agent": "proton-calendar-calc-importer/1.0"},
+            headers={"User-Agent": "calendar-calc-importer/1.0"},
         )
         response.raise_for_status()
     except requests.RequestException as error:
-        fail(f"Could not download Proton ICS feed: {error}")
+        fail(f"Could not download ICS feed: {error}")
 
     if not response.content:
-        fail("Proton ICS feed download was empty.")
+        fail("ICS feed download was empty.")
 
     try:
         return Calendar.from_ical(response.content)
@@ -130,16 +153,16 @@ def write_csv(rows: list[dict]) -> None:
 
 
 def main() -> None:
-    ics_url = os.environ.get("PROTON_ICS_URL", "").strip()
+    ics_url = os.environ.get("ICS_URL", "").strip()
 
     if not ics_url:
         fail(
-            "PROTON_ICS_URL is not set. "
-            "Check /etc/proton-calendar-calc.env."
+            "ICS_URL is not set. "
+            "Check the .env file"
         )
 
     if not ics_url.startswith(("https://", "http://")):
-        fail("PROTON_ICS_URL must start with https:// or http://.")
+        fail("ICS_URL must start with https:// or http://.")
 
     now = datetime.now(LOCAL_TIMEZONE)
     range_start = now - timedelta(days=DAYS_BEFORE)

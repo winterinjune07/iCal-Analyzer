@@ -30,8 +30,6 @@
 
 ## Future Plans
 
-- **I intend on making it export it to a CSV file so that it can be used to integrate into Excel and such.**
-
 - **Evantually I want to get enough time to make it able to pull tax info for more people, and have it more compatible with more forms of revenue / projections.**
 
 

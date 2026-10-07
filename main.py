@@ -1,6 +1,8 @@
 from datetime import date, timedelta
+from pathlib import Path
 import iCalImport as iCal
 import StringConvertor as StrConv
+import csv
 import os
 
 
@@ -133,3 +135,9 @@ for i in range(len(netPay)):
 print('Results:')
 for dict in output:
     print(f'\n {dict}')
+
+path = Path(__file__).parent / 'data' / 'output-data.csv'
+with open(path, 'w', newline='') as file:
+    writer = csv.DictWriter(file, fieldnames=output[0].keys())
+    writer.writeheader()
+    writer.writerows(output)

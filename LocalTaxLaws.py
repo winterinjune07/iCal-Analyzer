@@ -131,8 +131,3 @@ def breakdownMany(grosses):
         'annual_income_used': round(annual, 2),
         'projected': projected,
     }
-
-g = [1650, 1100, 1386]
-q = breakdownMany(g)
-for dict in q:
-    print(f'\n {dict}')

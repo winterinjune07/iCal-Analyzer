@@ -3,3 +3,4 @@
 .directory
 __pycache__
 /data/calendar.csv
+/data/output-data.csv

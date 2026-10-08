@@ -1,17 +1,20 @@
 from datetime import date, timedelta
 from pathlib import Path
+from dotenv import load_dotenv
 import iCalImport as iCal
 import StringConvertor as StrConv
 import csv
 import os
 
+load_dotenv()
+
 
 ##  Validating Environment Variables  ################################
-payPeriodType = os.environ.get("PAY_PERIOD_TYPE", "").strip().lower()
-hourly = os.environ.get("HOURLY_RATE", "").strip()
-tips = os.environ.get("AVG_TIPS", "").strip()
-prevPayPeriod = StrConv.Date(os.environ.get("PAST_PAY_PERIOD", "").strip())
-dBetweenPPandPD = os.environ.get("DAYS_BETWEEN_PAY_PERIOD_AND_PAYDAY", "").strip()
+payPeriodType = os.getenv("PAY_PERIOD_TYPE", "").strip().lower()
+hourly = os.getenv("HOURLY_RATE", "").strip()
+tips = os.getenv("AVG_TIPS", "").strip()
+prevPayPeriod = StrConv.Date(os.getenv("PAST_PAY_PERIOD", "").strip())
+dBetweenPPandPD = os.getenv("DAYS_BETWEEN_PAY_PERIOD_AND_PAYDAY", "").strip()
 
 errors = []
 
@@ -24,7 +27,7 @@ if StrConv.Float(tips) == False:
 if prevPayPeriod is None:
     errors.append('Invalid previous pay period')
 if StrConv.Float(dBetweenPPandPD) == False:
-    print('Invalid Value for Days Between Pay Period and Payday')
+    errors.append('Invalid Value for Days Between Pay Period and Payday')
 if errors != []:
     print(f'Exitting program. Reasoning:\n {errors}')
 ######################################################################
@@ -126,10 +129,11 @@ for i in range(len(netPay)):
     # Net Pay
     NP = netPay[i]
 
-    # Making the dates pretty
+    # Making the data pretty
     PPS = PPS.strftime('%m-%d-%Y');     CD = CD.strftime('%m-%d-%Y');       PPE = PPE.strftime('%m-%d-%Y')
+    H = StrConv.Float(H);               GP = StrConv.Float(GP);           NP = StrConv.Float(NP)
 
-    d = {"Pay Period Start": PPS, "Pay Period End": PPE, "Check Date": CD, "Hours": H, "Gross Pay": GP, "Net Pay": NP}
+    d = {"Pay Period Start": PPS, "Pay Period End": PPE, "Check Date": CD, "Hours": H.__round__(3), "Gross Pay": GP.__round__(3), "Net Pay": NP.__round__(3)}
     output.append(d)
 
 print('Results:')

@@ -2,5 +2,6 @@
 .env
 .directory
 __pycache__
+GoogleKeys
 /data/calendar.csv
 /data/output-data.csv

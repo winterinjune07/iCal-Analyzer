@@ -8,9 +8,23 @@ Usage:
     from paycheck import netPay, breakdown
     netPay(1200.00)       # -> float
     breakdown(1200.00)    # -> dict of per-check amounts
+
+Days off (from main.py's data/pay_periods.csv):
+    from paycheck import loadDaysOff, estimateGrosses, breakdownMany
+    off = loadDaysOff()                                  # {period_start: days_off}
+    est = estimateGrosses(past_grosses, past_off, future_off)
+    breakdownMany(past_grosses + est, past_off + future_off)
 """
 
+import csv
+from datetime import date
+from pathlib import Path
+
 PAY_PERIODS = 26  # biweekly
+PERIOD_DAYS = 14  # calendar days per biweekly period
+
+# main.py writes this file; assumed to sit next to this module
+PERIODS_FILE = Path(__file__).resolve().parent / "data" / "pay_periods.csv"
 
 # ---- Federal (2026, single) ----
 FED_STD_DEDUCTION = 16100
@@ -87,13 +101,65 @@ def netPay(gross):
     return breakdown(gross)['net']
 
 
-def breakdownMany(grosses):
+# ---------------------------------------------------------------------------
+# Days off
+# ---------------------------------------------------------------------------
+
+def loadDaysOff(path=PERIODS_FILE):
+    """Read main.py's pay_periods.csv -> {period_start (date): days_off (int)}."""
+    with open(path, newline="", encoding="utf-8") as f:
+        return {
+            date.fromisoformat(row["period_start"]): int(row["days_off"])
+            for row in csv.DictReader(f)
+        }
+
+
+def _checkDaysOff(days_off):
+    if any(d < 0 or d > PERIOD_DAYS for d in days_off):
+        raise ValueError(f"days off per period must be between 0 and {PERIOD_DAYS}")
+
+
+def dailyRate(grosses, days_off):
+    """
+    Gross earned per available (non-off) calendar day, from completed checks.
+    grosses and days_off are parallel lists, one entry per pay period.
+    """
+    grosses = [float(g) for g in grosses]
+    if len(grosses) != len(days_off):
+        raise ValueError("days_off must have one entry per gross")
+    _checkDaysOff(days_off)
+    available = sum(PERIOD_DAYS - d for d in days_off)
+    if available <= 0:
+        raise ValueError("no available days to derive a daily rate from")
+    return sum(grosses) / available
+
+
+def estimateGrosses(known_grosses, known_days_off, future_days_off):
+    """
+    Estimated gross for each future pay period.
+
+    Rate = gross per available day over the completed checks (days off in
+    those periods are excluded, so they don't drag the rate down). Each future
+    check = rate * (PERIOD_DAYS - that period's scheduled days off).
+
+    known_grosses must be real completed checks, not estimates.
+    """
+    _checkDaysOff(future_days_off)
+    rate = dailyRate(known_grosses, known_days_off)
+    return [rate * (PERIOD_DAYS - d) for d in future_days_off]
+
+
+def breakdownMany(grosses, days_off=None):
     """
     List of biweekly gross checks -> per-check breakdowns plus totals.
 
     Annual income = sum(grosses) if the list covers a full year (>= 26 checks).
-    Otherwise it is projected as mean(grosses) * 26, i.e. it assumes the
-    remaining checks average the same as the ones given.
+    Otherwise it is projected.
+      - days_off omitted: mean(grosses) * 26, i.e. it assumes the remaining
+        checks average the same as the ones given.
+      - days_off given (one entry per check, same order): daily rate from the
+        checks * (26 * 14 - total days off listed), i.e. the listed days off
+        are the only ones; unlisted periods are assumed to have none.
     Each check's tax = gross * (annual tax / annual income), so the per-check
     taxes sum to the annual tax when the list is a full year.
     """
@@ -104,7 +170,16 @@ def breakdownMany(grosses):
         raise ValueError("gross must be non-negative")
 
     projected = len(grosses) < PAY_PERIODS
-    annual = (sum(grosses) / len(grosses)) * PAY_PERIODS if projected else sum(grosses)
+    if not projected:
+        annual = sum(grosses)
+    elif days_off is None:
+        annual = (sum(grosses) / len(grosses)) * PAY_PERIODS
+    else:
+        rate = dailyRate(grosses, days_off)
+        annual = rate * (PAY_PERIODS * PERIOD_DAYS - sum(days_off))
+
+    if days_off is not None and len(days_off) != len(grosses):
+        raise ValueError("days_off must have one entry per gross")
 
     if annual == 0:
         rates = {'federal': 0.0, 'fica': 0.0, 'ohio': 0.0, 'cincinnati': 0.0}

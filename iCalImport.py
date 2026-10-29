@@ -3,14 +3,20 @@
 import csv
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
+from dotenv import load_dotenv
 import StringConvertor as StrConv
-import recurring_ical_events
+import recurring_ical_events    
 import requests
 from icalendar import Calendar
+
+load_dotenv = load_dotenv()
+
+# Event names that feed the pay-period totals (exact match, case-insensitive).
+WORK_EVENT_NAME = os.environ.get("WORK_EVENT_NAME", "").strip()
+TIME_OFF_EVENT_NAME = os.environ.get("TIME_OFF_EVENT_NAME", "").strip()
 
 def parsePayPeriod():
     payPeriodType = os.environ.get("PAY_PERIOD_TYPE", "")
@@ -37,9 +43,14 @@ LOCAL_TIMEZONE = ZoneInfo(TZ)
 PROJECT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_DIR / "data"
 OUTPUT_FILE = OUTPUT_DIR / "calendar.csv"
+PERIODS_FILE = OUTPUT_DIR / "pay_periods.csv"
 
 today2 = date.today()
-payPeriodHistory = today2 - (StrConv.Date(os.environ.get("PAST_PAY_PERIOD", "").strip()))
+# PAST_PAY_PERIOD is the date a past pay period ENDED, so the next period
+# starts the day after. Periods are laid out back and forth from that start
+# date in steps of daysToPay.
+PAY_PERIOD_ANCHOR = StrConv.Date(os.environ.get("PAST_PAY_PERIOD", "").strip()) + timedelta(days=1)
+payPeriodHistory = today2 - PAY_PERIOD_ANCHOR
 
 DAYS_BEFORE = (payPeriodHistory.days + daysToPay)
 DAYS_AHEAD = 365
@@ -56,6 +67,14 @@ CSV_COLUMNS = [
     "description",
     "status",
     "last_modified",
+]
+
+PERIOD_COLUMNS = [
+    "period_start",
+    "period_end",
+    "hours_worked",
+    "hours_excluded",
+    "days_off",
 ]
 
 
@@ -84,7 +103,14 @@ def isoformat_local(value: datetime) -> str:
     return value.isoformat(timespec="minutes")
 
 
-def parse_event(event) -> dict:
+def elapsed_seconds(start: datetime, end: datetime) -> float:
+    """Real elapsed time. Subtracting two datetimes that share the same
+    ZoneInfo ignores UTC offsets, so a span across a DST change would be
+    off by an hour. Converting to UTC first avoids that."""
+    return (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)).total_seconds()
+
+
+def parse_event(event) -> tuple[dict, datetime, datetime]:
     start_value = event.decoded("DTSTART")
     start_is_all_day = isinstance(start_value, date) and not isinstance(start_value, datetime)
 
@@ -100,9 +126,9 @@ def parse_event(event) -> dict:
     start = normalize_datetime(start_value)
     end = normalize_datetime(end_value)
 
-    duration_minutes = round((end - start).total_seconds() / 60)
+    duration_minutes = round(elapsed_seconds(start, end) / 60)
 
-    return {
+    row = {
         "uid": get_text(event, "UID"),
         "summary": get_text(event, "SUMMARY"),
         "start": isoformat_local(start),
@@ -114,6 +140,73 @@ def parse_event(event) -> dict:
         "status": get_text(event, "STATUS"),
         "last_modified": get_text(event, "LAST-MODIFIED"),
     }
+    return row, start, end
+
+
+# ---------------------------------------------------------------------------
+# Pay-period bucketing
+# ---------------------------------------------------------------------------
+
+def period_start_for(day: date) -> date:
+    """First day of the pay period containing `day`."""
+    periods_elapsed = (day - PAY_PERIOD_ANCHOR).days // daysToPay
+    return PAY_PERIOD_ANCHOR + timedelta(days=periods_elapsed * daysToPay)
+
+
+def bucket(totals: dict, period_start: date) -> dict:
+    return totals.setdefault(
+        period_start,
+        {"hours_worked": 0.0, "hours_excluded": 0.0, "days_off": 0},
+    )
+
+
+def build_period_totals(range_start: datetime, range_end: datetime) -> dict:
+    """One entry per pay period in range, so empty periods still appear as zeros."""
+    totals: dict = {}
+    period_start = period_start_for(range_start.date())
+    while period_start <= range_end.date():
+        bucket(totals, period_start)
+        period_start += timedelta(days=daysToPay)
+    return totals
+
+
+def covered_days(start: datetime, end: datetime) -> list[date]:
+    """Calendar days an event touches. All-day DTEND is exclusive, so the last
+    covered day is the one containing the instant before `end`."""
+    last_day = max(start, end - timedelta(microseconds=1)).date()
+    days = []
+    day = start.date()
+    while day <= last_day:
+        days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def add_work_hours(totals: dict, off_days: set, start: datetime, end: datetime) -> None:
+    """Add worked hours one local calendar day at a time. Time that falls on a
+    day off is not counted as worked; it goes to hours_excluded instead."""
+    cursor = start
+    while cursor < end:
+        next_midnight = datetime.combine(
+            cursor.date() + timedelta(days=1),
+            time.min,
+            tzinfo=LOCAL_TIMEZONE,
+        )
+        segment_end = min(end, next_midnight)
+        hours = elapsed_seconds(cursor, segment_end) / 3600
+        period = bucket(totals, period_start_for(cursor.date()))
+        if cursor.date() in off_days:
+            period["hours_excluded"] += hours
+        else:
+            period["hours_worked"] += hours
+        cursor = segment_end
+
+
+def add_days_off(totals: dict, off_days: set) -> None:
+    """Count each distinct day off once, in the pay period containing it
+    (overlapping time-off events don't double count)."""
+    for day in off_days:
+        bucket(totals, period_start_for(day))["days_off"] += 1
 
 
 def download_calendar(ics_url: str) -> Calendar:
@@ -136,20 +229,20 @@ def download_calendar(ics_url: str) -> Calendar:
         fail(f"Downloaded content is not a valid ICS calendar: {error}")
 
 
-def write_csv(rows: list[dict]) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def write_csv(path: Path, columns: list[str], rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    temporary_file = OUTPUT_FILE.with_suffix(".csv.tmp")
+    temporary_file = path.with_suffix(".csv.tmp")
 
     try:
         with temporary_file.open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=CSV_COLUMNS)
+            writer = csv.DictWriter(file, fieldnames=columns)
             writer.writeheader()
             writer.writerows(rows)
 
-        temporary_file.replace(OUTPUT_FILE)
+        temporary_file.replace(path)
     except OSError as error:
-        fail(f"Could not write CSV file {OUTPUT_FILE}: {error}")
+        fail(f"Could not write CSV file {path}: {error}")
 
 
 def main() -> None:
@@ -165,7 +258,12 @@ def main() -> None:
         fail("ICS_URL must start with https:// or http://.")
 
     now = datetime.now(LOCAL_TIMEZONE)
-    range_start = now - timedelta(days=DAYS_BEFORE)
+    # Start at local midnight so events earlier in the first day aren't dropped.
+    range_start = datetime.combine(
+        now.date() - timedelta(days=DAYS_BEFORE),
+        time.min,
+        tzinfo=LOCAL_TIMEZONE,
+    )
     range_end = now + timedelta(days=DAYS_AHEAD)
 
     calendar = download_calendar(ics_url)
@@ -179,10 +277,28 @@ def main() -> None:
         fail(f"Could not expand recurring events: {error}")
 
     rows = []
+    period_totals = build_period_totals(range_start, range_end)
+    ignored_names = set()
+    work_shifts = []
+    off_days = set()
+    work_name = WORK_EVENT_NAME.casefold()
+    time_off_name = TIME_OFF_EVENT_NAME.casefold()
 
     for event in expanded_events:
         try:
-            rows.append(parse_event(event))
+            row, start, end = parse_event(event)
+            rows.append(row)
+
+            if row["status"].upper() == "CANCELLED":
+                continue
+
+            name = row["summary"].strip().casefold()
+            if name == work_name:
+                work_shifts.append((start, end))
+            elif name == time_off_name:
+                off_days.update(covered_days(start, end))
+            else:
+                ignored_names.add(row["summary"])
         except Exception as error:
             uid = get_text(event, "UID") or "<no UID>"
             print(
@@ -190,20 +306,44 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-
+    # Days off are only known once every event has been read, so tally now.
+    add_days_off(period_totals, off_days)
+    for start, end in work_shifts:
+        add_work_hours(period_totals, off_days, start, end)
 
     rows.sort(key=lambda row: (row["start"], row["summary"], row["uid"]))
 
-    write_csv(rows)
+    write_csv(OUTPUT_FILE, CSV_COLUMNS, rows)
 
-    temp1 = (list(rows[-1].values())[2])
-    temp2 = (list(rows[0].values())[2])
+    period_rows = [
+        {
+            "period_start": period_start.isoformat(),
+            "period_end": (period_start + timedelta(days=daysToPay - 1)).isoformat(),
+            "hours_worked": round(totals["hours_worked"], 4),
+            "hours_excluded": round(totals["hours_excluded"], 4),
+            "days_off": totals["days_off"],
+        }
+        for period_start, totals in sorted(period_totals.items())
+    ]
+    write_csv(PERIODS_FILE, PERIOD_COLUMNS, period_rows)
 
-    print(
-        f"SUCCESS: Wrote {len(rows)} events"
-        f"for {temp2.split('T')[0]} through "
-        f"{temp1.split('T')[0]}."
-    )
+    if ignored_names:
+        print(
+            f"NOTE: Ignored events not named '{WORK_EVENT_NAME}' or "
+            f"'{TIME_OFF_EVENT_NAME}': {', '.join(sorted(ignored_names))}",
+            file=sys.stderr,
+        )
+
+    if rows:
+        first_day = rows[0]["start"].split("T")[0]
+        last_day = rows[-1]["start"].split("T")[0]
+        print(
+            f"SUCCESS: Wrote {len(rows)} events "
+            f"for {first_day} through {last_day}, "
+            f"and {len(period_rows)} pay periods."
+        )
+    else:
+        print(f"SUCCESS: Wrote 0 events and {len(period_rows)} pay periods.")
 
 
 if __name__ == "__main__":

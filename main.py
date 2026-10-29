@@ -1,13 +1,14 @@
 from datetime import date, timedelta
-from pathlib import Path
+import StringConvertor as StrConv
 from dotenv import load_dotenv
 import iCalImport as iCal
-import StringConvertor as StrConv
+from pathlib import Path
+import sys
 import csv
 import os
 
-load_dotenv()
 
+load_dotenv()
 
 ##  Validating Environment Variables  ################################
 payPeriodType = os.getenv("PAY_PERIOD_TYPE", "").strip().lower()
@@ -30,6 +31,7 @@ if StrConv.Float(dBetweenPPandPD) == False:
     errors.append('Invalid Value for Days Between Pay Period and Payday')
 if errors != []:
     print(f'Exitting program. Reasoning:\n {errors}')
+    sys.exit(1)
 ######################################################################
 
 
@@ -37,71 +39,42 @@ if errors != []:
 hourly = float(hourly); tips = float(tips); dBetweenPPandPD = float(dBetweenPPandPD)
 
 
-# CSV Template  :   uid, summary, start, end, location, description, status, last_modified
-# Runs the pre-established calendar fetch service
+# Runs the pre-established calendar fetch service. It writes
+#   data/calendar.csv    - every raw event
+#   data/pay_periods.csv - hours worked per pay period. Only "Panera" shifts
+#                          count, and time on a scheduled day off is excluded.
 iCal.main()
 
 
-# Parse the file into a list of durations
-trows = []
-durations = []
-dates = []
-
-with open('./data/calendar.csv', 'r') as file:
-    for line in file:
-        for i in line.split(','):
-            trows.append(i)
-        if trows[5] != 'duration_minutes' and trows[5] != '':
-            durations.append(float(trows[5]))
-            a = trows[2].split('T')
-            dates.append(a[0])
-        trows = []
-
-# Parse the pay period
+# Read the hours per pay period
 today = date.today()
+pay = hourly + tips
 
-if payPeriodType == 'daily':
-    daysToPay = 1
-elif payPeriodType == 'weekly':
-    daysToPay = 7
-elif payPeriodType == 'biweekly':
-    daysToPay = 14
-else:
-    daysToPay = 30
+periodsPath = Path(__file__).parent / 'data' / 'pay_periods.csv'
+periods = []
 
+with open(periodsPath, 'r', newline='', encoding='utf-8') as file:
+    for r in csv.DictReader(file):
+        periods.append({
+            'start': date.fromisoformat(r['period_start']),
+            'end': date.fromisoformat(r['period_end']),
+            'hours': float(r['hours_worked']),
+        })
 
-# Calculate the durations
-StrConv.Float(hourly);  StrConv.Float(tips)
-pay = float(hourly + tips)
-
-
-# Consolidate the paychecks
-periodLen = timedelta(days=daysToPay)
-groups = {}  # payday -> list of durations
-
-for dateStr, dur in zip(dates, durations):
-    d = StrConv.Date(dateStr)
-    n = -((prevPayPeriod - d) // periodLen)   # ceil: which payday closes this entry's period
-    payday = prevPayPeriod + n * periodLen
-    groups.setdefault(payday, []).append(dur)
-
-sortedPayPeriods = [groups[p] for p in sorted(groups) if p <= today]
-UpcomingCheckDurations = [dur for p in sorted(groups) if p > today for dur in groups[p]]
+periods.sort(key=lambda p: p['start'])
 
 
-# Turning it into hours
-consolidatedHours = []
+# Which periods get a row: every period that has ended, the one in progress,
+# and any later period that already has shifts scheduled (no gaps in between).
+current = next((i for i, p in enumerate(periods) if p['end'] > today), len(periods) - 1)
+last = max([current] + [i for i, p in enumerate(periods) if p['hours'] > 0])
+periods = periods[:last + 1]
 
-for list in sortedPayPeriods:
-    b = sum(list)
-    consolidatedHours.append(b / 60)
-
-c = sum(UpcomingCheckDurations)
-consolidatedHours.append(c / 60)
+consolidatedHours = [p['hours'] for p in periods]
 
 
 # Convert to dollar amounts
-grossPay = [i * float(pay) for i in consolidatedHours]
+grossPay = [i * pay for i in consolidatedHours]
 
 
 # Taxes
@@ -115,11 +88,10 @@ netPay = [c['net'] for c in postTax['checks']]
 
 output = []
 
-for i in range(len(netPay)):
-    # Pay Period Start
-    PPS = ((prevPayPeriod - timedelta(days=daysToPay)) + timedelta(days=daysToPay) * StrConv.Int(i)) + timedelta(days=1)
-    # Pay Period End
-    PPE = (PPS + timedelta(days=daysToPay)) - timedelta(days=1)
+for i, p in enumerate(periods):
+    # Pay Period Start / End
+    PPS = p['start']
+    PPE = p['end']
     # Check Date
     CD = PPE + timedelta(days=dBetweenPPandPD)
     # Hours Worked
@@ -137,8 +109,8 @@ for i in range(len(netPay)):
     output.append(d)
 
 print('Results:')
-for dict in output:
-    print(f'\n {dict}')
+for entry in output:
+    print(f'\n {entry}')
 
 path = Path(__file__).parent / 'data' / 'output-data.csv'
 with open(path, 'w', newline='') as file:

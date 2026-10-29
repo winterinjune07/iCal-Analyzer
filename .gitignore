@@ -4,5 +4,6 @@
 __pycache__
 GoogleKeys
 /data/calendar.csv
+/data/pay_periods.csv
 /data/output-data.csv
 iCal-Analyzer.code-workspace

@@ -6,4 +6,5 @@ GoogleKeys
 /data/calendar.csv
 /data/pay_periods.csv
 /data/output-data.csv
+/data/monthly-totals.csv
 iCal-Analyzer.code-workspace

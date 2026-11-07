@@ -3,6 +3,7 @@ import StringConvertor as StrConv
 from dotenv import load_dotenv
 import iCalImport as iCal
 from pathlib import Path
+import monthlies
 import sys
 import csv
 import os
@@ -117,3 +118,5 @@ with open(path, 'w', newline='') as file:
     writer = csv.DictWriter(file, fieldnames=output[0].keys())
     writer.writeheader()
     writer.writerows(output)
+
+monthlies.main()
